@@ -1,11 +1,12 @@
 """Request Classifier — main entry point.
 
 Reads messages from messages.txt, classifies each, generates responses,
-and prints results to CLI.
+and prints results to CLI. Supports both rule-based and LLM modes.
 """
 
-from classifier import classify, validate_category
-from responder import generate_response, validate_response
+import sys
+from classifier import classify, classify_with_llm, validate_category
+from responder import generate_response, generate_response_with_llm, validate_response
 from memory import append_record
 
 MESSAGES_FILE = "messages.txt"
@@ -31,11 +32,12 @@ def load_messages(filepath: str = MESSAGES_FILE) -> list[str]:
         return []
 
 
-def process_message(message: str) -> dict:
+def process_message(message: str, use_llm: bool = False) -> dict:
     """Process a single message through the full pipeline.
 
     Args:
         message: The input message to classify.
+        use_llm: If True, use LLM for classification and response generation.
 
     Returns:
         A dict with keys: message, category, response, confidence, valid.
@@ -49,13 +51,19 @@ def process_message(message: str) -> dict:
             "valid": False,
         }
 
-    category, confidence = classify(message)
+    if use_llm:
+        category, confidence = classify_with_llm(message)
+    else:
+        category, confidence = classify(message)
 
     if not validate_category(category):
         category = "другое"
         confidence = 0.0
 
-    response = generate_response(category, message)
+    if use_llm:
+        response = generate_response_with_llm(category, message)
+    else:
+        response = generate_response(category, message)
 
     if not validate_response(response):
         response = "Ваше обращение зарегистрировано."
@@ -77,18 +85,22 @@ def process_message(message: str) -> dict:
 
 def main() -> None:
     """Run the classifier pipeline on messages.txt."""
+    use_llm = "--llm" in sys.argv
+
     messages = load_messages()
 
     if not messages:
         print("Нет сообщений для обработки.")
         return
 
+    mode = "LLM (Gemini)" if use_llm else "Rule-based"
     print("=" * 60)
     print("Классификатор обращений студентов")
+    print(f"Режим: {mode}")
     print("=" * 60)
 
     for i, message in enumerate(messages, 1):
-        result = process_message(message)
+        result = process_message(message, use_llm=use_llm)
 
         print(f"\n{i}. {result['message']}")
         print(f"   Категория: {result['category']}")

@@ -1,6 +1,7 @@
-"""Template-based response generator for classified messages."""
+"""Template-based and LLM-based response generator for classified messages."""
 
 from classifier import Category
+from llm_client import call_llm
 
 RESPONSE_TEMPLATES: dict[Category, str] = {
     "справка": "Для получения информации обратитесь в деканат или справочную службу.",
@@ -35,3 +36,44 @@ def validate_response(response: str) -> bool:
         return False
     has_cyrillic = bool(__import__("re").search(r"[а-яА-ЯёЁ]", response))
     return has_cyrillic
+
+
+RESPONSE_SYSTEM_PROMPT = """You are a helpful assistant generating responses to Russian student messages.
+
+Rules:
+- All responses must be in Russian
+- Keep responses short, polite, neutral, and useful
+- Never hallucinate facts (no office numbers, URLs, names, hours)
+- For complaints (жалоба): use phrasing like "Обращение подготовлено для передачи ответственному сотруднику"
+- For information requests (справка): provide general guidance without specific details
+- For other (другое): acknowledge the message and indicate it's registered"""
+
+RESPONSE_PROMPT = """Generate a response to this student message.
+
+Category: {category}
+Message: {message}
+
+Respond with ONLY the response text in Russian. No quotes, no explanation."""
+
+
+def generate_response_with_llm(category: Category, message: str) -> str:
+    """Generate a response using LLM with fallback to template.
+
+    Args:
+        category: The classification category.
+        message: The original message.
+
+    Returns:
+        A response string in Russian.
+    """
+    try:
+        prompt = RESPONSE_PROMPT.format(category=category, message=message)
+        response = call_llm(prompt, system=RESPONSE_SYSTEM_PROMPT)
+
+        if response and validate_response(response):
+            return response
+
+    except (ValueError, ImportError):
+        pass
+
+    return generate_response(category, message)

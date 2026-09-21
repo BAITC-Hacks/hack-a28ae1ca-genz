@@ -2,11 +2,13 @@
 
 import sys
 import os
+from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from classifier import classify, validate_category
-from responder import generate_response, validate_response
+from classifier import classify, classify_with_llm, validate_category
+from responder import generate_response, generate_response_with_llm, validate_response
+from llm_client import parse_json_response
 from memory import load_memory, save_memory, append_record
 from main import process_message, load_messages
 
@@ -135,7 +137,7 @@ class TestMemory:
     def test_append_record(self, tmp_path):
         filepath = str(tmp_path / "append_test.json")
         append_record("test msg", "справка", "test response", 0.8, filepath)
-        records = load_messages(filepath) if False else load_memory(filepath)
+        records = load_memory(filepath)
         assert len(records) == 1
         assert records[0]["message"] == "test msg"
         assert records[0]["category"] == "справка"
@@ -162,3 +164,126 @@ class TestPipeline:
         categories = [r["category"] for r in results]
         assert categories == ["справка", "жалоба", "другое", "жалоба", "справка"]
         assert all(r["valid"] for r in results)
+
+
+# === LLM Client tests ===
+
+class TestLLMClient:
+    """Test LLM client utilities."""
+
+    def test_parse_json_response_valid(self):
+        text = '{"category": "справка", "confidence": 0.9}'
+        result = parse_json_response(text)
+        assert result == {"category": "справка", "confidence": 0.9}
+
+    def test_parse_json_response_with_markdown(self):
+        text = '```json\n{"category": "жалоба", "confidence": 0.8}\n```'
+        result = parse_json_response(text)
+        assert result == {"category": "жалоба", "confidence": 0.8}
+
+    def test_parse_json_response_invalid(self):
+        text = "not json at all"
+        result = parse_json_response(text)
+        assert result is None
+
+    def test_parse_json_response_empty(self):
+        result = parse_json_response("")
+        assert result is None
+
+    def test_parse_json_response_none(self):
+        result = parse_json_response(None)
+        assert result is None
+
+
+# === LLM Classification tests ===
+
+class TestLLMClassification:
+    """Test LLM classification with mocked API calls."""
+
+    @patch("classifier.call_llm")
+    def test_classify_with_llm_valid_response(self, mock_call_llm):
+        mock_call_llm.return_value = '{"category": "справка", "confidence": 0.95}'
+        cat, conf = classify_with_llm("Где парковка?")
+        assert cat == "справка"
+        assert conf == 0.95
+
+    @patch("classifier.call_llm")
+    def test_classify_with_llm_invalid_category(self, mock_call_llm):
+        mock_call_llm.return_value = '{"category": "invalid", "confidence": 0.9}'
+        cat, conf = classify_with_llm("Где парковка?")
+        assert cat == "справка"  # Falls back to rule-based
+        assert 0.0 <= conf <= 1.0
+
+    @patch("classifier.call_llm")
+    def test_classify_with_llm_api_failure(self, mock_call_llm):
+        mock_call_llm.return_value = None
+        cat, conf = classify_with_llm("Где парковка?")
+        assert cat == "справка"  # Falls back to rule-based
+        assert 0.0 <= conf <= 1.0
+
+    @patch("classifier.call_llm")
+    def test_classify_with_llm_empty_input(self, mock_call_llm):
+        cat, conf = classify_with_llm("")
+        assert cat == "другое"
+        assert conf == 0.0
+        mock_call_llm.assert_not_called()
+
+    @patch("classifier.call_llm")
+    def test_classify_with_llm_json_parse_error(self, mock_call_llm):
+        mock_call_llm.return_value = "not json"
+        cat, conf = classify_with_llm("Где парковка?")
+        assert cat == "справка"  # Falls back to rule-based
+
+
+# === LLM Response Generation tests ===
+
+class TestLLMResponseGeneration:
+    """Test LLM response generation with mocked API calls."""
+
+    @patch("responder.call_llm")
+    def test_generate_response_with_llm_valid(self, mock_call_llm):
+        mock_call_llm.return_value = "Обращение принято к рассмотрению."
+        resp = generate_response_with_llm("жалоба", "Еда холодная")
+        assert resp == "Обращение принято к рассмотрению."
+
+    @patch("responder.call_llm")
+    def test_generate_response_with_llm_empty_response(self, mock_call_llm):
+        mock_call_llm.return_value = ""
+        resp = generate_response_with_llm("справка", "Где парковка?")
+        assert resp == "Для получения информации обратитесь в деканат или справочную службу."
+
+    @patch("responder.call_llm")
+    def test_generate_response_with_llm_non_russian(self, mock_call_llm):
+        mock_call_llm.return_value = "Response in English"
+        resp = generate_response_with_llm("справка", "Где парковка?")
+        assert resp == "Для получения информации обратитесь в деканат или справочную службу."
+
+    @patch("responder.call_llm")
+    def test_generate_response_with_llm_api_failure(self, mock_call_llm):
+        mock_call_llm.side_effect = ValueError("API key not set")
+        resp = generate_response_with_llm("жалоба", "Проблема")
+        assert resp == "Обращение подготовлено для передачи ответственному сотруднику."
+
+
+# === Integration with mocked LLM ===
+
+class TestLLMIntegration:
+    """Test full pipeline with mocked LLM calls."""
+
+    @patch("responder.call_llm")
+    @patch("classifier.call_llm")
+    def test_process_message_with_llm(self, mock_classify_llm, mock_respond_llm):
+        mock_classify_llm.return_value = '{"category": "справка", "confidence": 0.9}'
+        mock_respond_llm.return_value = "Информация доступна в деканате."
+        result = process_message("Где парковка?", use_llm=True)
+        assert result["category"] == "справка"
+        assert result["valid"] is True
+
+    @patch("responder.call_llm")
+    @patch("classifier.call_llm")
+    def test_process_message_llm_fallback(self, mock_classify_llm, mock_respond_llm):
+        mock_classify_llm.return_value = None
+        mock_respond_llm.return_value = None
+        result = process_message("Где парковка?", use_llm=True)
+        assert result["category"] == "справка"  # Falls back to rule-based
+        assert result["valid"] is True
